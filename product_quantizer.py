@@ -1,3 +1,7 @@
+import numpy as np
+from sklearn.cluster import KMeans, MiniBatchKMeans
+from typing import List, Union
+
 class ProductQuantizer:
     def __init__(self, M, K, D):
         """
@@ -8,17 +12,53 @@ class ProductQuantizer:
         self.M = M
         self.K = K
         self.D = D
-        self.d_sub = D // M  # subvector dimension
+        if self.D % self.M != 0:
+            raise ValueError("[PQ] D is not divisible by M")
+        self.d_sub = D//M  # subvector dimension
         self.codebooks = None  # List of M codebooks, each (K, d_sub)
         self.is_trained = False
+    def split_vectors(self, vectors: np.ndarray) -> List[np.ndarray]:
+        """
+        split vectors (N, D) to M sub-vectors
+        returns list of M arrays, each array has shape (N, d_sub)
+        """
+        print("Vectors Shape: ", vectors.shape[:])
+        N = vectors.shape[0]
+        reshape = vectors.reshape(N,self.M,self.d_sub) # reshape (N,D)->(N,M,d_sub)
+        print("Reshaped Vectors: ", reshape)
+        return np.split(reshape, self.M, axis=1)
+    
+    def choose_batch_size(self, N: int) -> int: 
+        """
+        Too small -> noisy updates (worse clusters)
+        Too large -> slow, consumes too much memory
+        batch_size << N (0.05% - 0.2%)
+        """
+        if 1e6 <= N <= 5e6: 
+            return 1024
+        if 5e6 < N <= 1e7:
+            return 2048
+        return 4096
     
     def fit(self, vectors):
         """Learn codebooks from training vectors"""
-        pass
+        subvectors_list = self.split_vectors(vectors)
+        batch_size = self.choose_batch_size(vectors.shape[0])
+        self.codebooks = []
+        for i, subvectors in enumerate(subvectors_list):
+            subvectors = subvectors.squeeze(axis=1) # (N, d_sub, 1) -> (N, d_sub)
+            kmeans = MiniBatchKMeans(n_clusters=self.K, random_state=42,verbose=1,batch_size=batch_size)
+            kmeans.fit(subvectors)
+            self.codebooks.append(kmeans.cluster_centers_)
+        print("Codebooks: ", self.codebooks)
+        self.is_trained = True 
+        print(f"[PQ] trained with M={self.M} subvectors and K={self.K} codewords each")
     
     def encode(self, vectors):
         """Encode vectors to PQ codes"""
-        pass
+        if not self.is_trained or self.codebooks is None: 
+            raise RuntimeError("[PQ] must be trained before encode")
+        
     
     def decode(self, codes):
         """Reconstruct approximate vectors from codes"""
@@ -27,3 +67,22 @@ class ProductQuantizer:
     def compute_asymmetric_distance(self, query, codes):
         """Compute distances between query and PQ-encoded vectors"""
         pass
+
+vectors = np.array([
+    [1,2,3,4,5,6,7,8,9,10],
+    [2,3,4,5,6,7,8,9,10,11],
+    [3,4,5,6,7,8,9,10,11,12],
+    [4,5,6,7,8,9,10,11,12,13],
+    [5,6,7,8,9,10,11,12,13,14],
+    [6,7,8,9,10,11,12,13,14,15],
+    [10,9,8,7,6,5,4,3,2,1],
+    [11,10,9,8,7,6,5,4,3,2],
+    [12,11,10,9,8,7,6,5,4,3],
+    [20,18,16,14,12,10,8,6,4,2],
+    [21,19,17,15,13,11,9,7,5,3],
+    [22,20,18,16,14,12,10,8,6,4],
+])
+
+pq = ProductQuantizer(5,4,10)
+print()
+print(pq.fit(vectors))
