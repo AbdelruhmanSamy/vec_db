@@ -23,24 +23,23 @@ class ProductQuantizer:
         split vectors (N, D) to M sub-vectors
         returns list of M arrays, each array has shape (N, d_sub)
         """
-        print("Vectors Shape: ", vectors.shape[:])
+        # print("Vectors Shape: ", vectors.shape[:])
         N = vectors.shape[0]
         reshape = vectors.reshape(N,self.M,self.d_sub) # reshape (N,D)->(N,M,d_sub)
-        print("Reshaped Vectors: ", reshape)
+        # print("Reshaped Vectors: ", reshape)
         return np.split(reshape, self.M, axis=1)
     
     
     def fit(self, vectors):
         """Learn codebooks from training vectors"""
         subvectors_list = self.split_vectors(vectors)
-        batch_size = self.choose_batch_size(vectors.shape[0])
         self.codebooks = []
         for i, subvectors in enumerate(subvectors_list):
             subvectors = subvectors.squeeze(axis=1) # (N, d_sub, 1) -> (N, d_sub)
-            kmeans = MiniBatchKMeans(n_clusters=self.K, random_state=42,verbose=1,batch_size=self.batch_size)
+            kmeans = MiniBatchKMeans(n_clusters=self.K, random_state=42,batch_size=self.batch_size)
             kmeans.fit(subvectors)
             self.codebooks.append(kmeans.cluster_centers_)
-        print("Codebooks: ", self.codebooks)
+        # print("Codebooks: ", self.codebooks)
         self.is_trained = True 
         print(f"[PQ] trained with M={self.M} subvectors and K={self.K} codewords each")
     
@@ -48,6 +47,18 @@ class ProductQuantizer:
         """Encode vectors to PQ codes"""
         if not self.is_trained or self.codebooks is None: 
             raise RuntimeError("[PQ] must be trained before encode")
+        
+        subvectors_list = self.split_vectors(vectors)
+        N = vectors.shape[0]
+        codes = np.empty((N, self.M), dtype=np.int32)
+
+        for i, subvectors in enumerate(subvectors_list): 
+            subvectors = subvectors.squeeze(axis=1) 
+            centroids = self.codebooks[i]
+
+            dists = np.sum((subvectors[:, None, :]-centroids[None, :, :])**2, axis=2)
+            codes[:, i] = np.argmin(dists, axis=1)
+        return codes 
         
     
     def decode(self, codes):
@@ -73,6 +84,6 @@ vectors = np.array([
     [22,20,18,16,14,12,10,8,6,4],
 ])
 
-pq = ProductQuantizer(5,4,10)
-print()
-print(pq.fit(vectors))
+pq = ProductQuantizer(2,4,10, 1024)
+pq.fit(vectors)
+print(pq.encode(vectors))
