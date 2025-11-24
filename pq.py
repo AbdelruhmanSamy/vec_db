@@ -3,7 +3,7 @@ from sklearn.cluster import MiniBatchKMeans
 from typing import List
 
 class ProductQuantizer:
-    def __init__(self, M, K, D):
+    def __init__(self, M, K, D, kmeans_batch_size):
         """
         M: number of subvectors
         K: codebook size per subvector
@@ -12,9 +12,10 @@ class ProductQuantizer:
         self.M = M
         self.K = K
         self.D = D
+        self.batch_size = kmeans_batch_size
         if self.D % self.M != 0:
             raise ValueError("[PQ] D is not divisible by M")
-        self.d_sub = D//M  # subvector dimension
+        self.d_sub = D // M  # subvector dimension
         self.codebooks = None  # List of M codebooks, each (K, d_sub)
         self.is_trained = False
         
@@ -23,44 +24,46 @@ class ProductQuantizer:
         split vectors (N, D) to M sub-vectors
         returns list of M arrays, each array has shape (N, d_sub)
         """
-        print("Vectors Shape: ", vectors.shape[:])
+        # print("Vectors Shape: ", vectors.shape[:])
         N = vectors.shape[0]
-        reshape = vectors.reshape(N,self.M,self.d_sub) # reshape (N,D)->(N,M,d_sub)
-        print("Reshaped Vectors: ", reshape)
+        reshape = vectors.reshape(N, self.M, self.d_sub)  # reshape (N,D)->(N,M,d_sub)
+        # print("Reshaped Vectors: ", reshape)
         return np.split(reshape, self.M, axis=1)
-    
-    def choose_batch_size(self, N: int) -> int: 
-        """
-        Too small -> noisy updates (worse clusters)
-        Too large -> slow, consumes too much memory
-        batch_size << N (0.05% - 0.2%)
-        """
-        if 1e6 <= N <= 5e6: 
-            return 1024
-        if 5e6 < N <= 1e7:
-            return 2048
-        return 4096
-    
+
     def fit(self, vectors):
         """Learn codebooks from training vectors"""
         subvectors_list = self.split_vectors(vectors)
-        batch_size = self.choose_batch_size(vectors.shape[0])
         self.codebooks = []
         for i, subvectors in enumerate(subvectors_list):
-            subvectors = subvectors.squeeze(axis=1) # (N, d_sub, 1) -> (N, d_sub)
-            kmeans = MiniBatchKMeans(n_clusters=self.K, random_state=42,verbose=1,batch_size=batch_size)
+            subvectors = subvectors.squeeze(axis=1)  # (N, d_sub, 1) -> (N, d_sub)
+            kmeans = MiniBatchKMeans(
+                n_clusters=self.K, random_state=42, batch_size=self.batch_size
+            )
             kmeans.fit(subvectors)
             self.codebooks.append(kmeans.cluster_centers_)
-        print("Codebooks: ", self.codebooks)
-        self.is_trained = True 
+        # print("Codebooks: ", self.codebooks)
+        self.is_trained = True
         print(f"[PQ] trained with M={self.M} subvectors and K={self.K} codewords each")
-    
+
     def encode(self, vectors):
         """Encode vectors to PQ codes"""
-        if not self.is_trained or self.codebooks is None: 
+        if not self.is_trained or self.codebooks is None:
             raise RuntimeError("[PQ] must be trained before encode")
-        return
-    
+
+        subvectors_list = self.split_vectors(vectors)
+        N = vectors.shape[0]
+        codes = np.empty((N, self.M), dtype=np.int32)
+
+        for i, subvectors in enumerate(subvectors_list):
+            subvectors = subvectors.squeeze(axis=1)
+            centroids = self.codebooks[i]
+
+            dists = np.sum(
+                (subvectors[:, None, :] - centroids[None, :, :]) ** 2, axis=2
+            )
+            codes[:, i] = np.argmin(dists, axis=1)
+        return codes
+
     def decode(self, codes):
         """
         Reconstruct approximate vectors from codes.
@@ -130,21 +133,25 @@ class ProductQuantizer:
         return np.sqrt(np.sum(distances, axis=1))
         
 
-vectors = np.array([
-    [1,2,3,4,5,6,7,8,9,10],
-    [2,3,4,5,6,7,8,9,10,11],
-    [3,4,5,6,7,8,9,10,11,12],
-    [4,5,6,7,8,9,10,11,12,13],
-    [5,6,7,8,9,10,11,12,13,14],
-    [6,7,8,9,10,11,12,13,14,15],
-    [10,9,8,7,6,5,4,3,2,1],
-    [11,10,9,8,7,6,5,4,3,2],
-    [12,11,10,9,8,7,6,5,4,3],
-    [20,18,16,14,12,10,8,6,4,2],
-    [21,19,17,15,13,11,9,7,5,3],
-    [22,20,18,16,14,12,10,8,6,4],
-])
 
-pq = ProductQuantizer(5,4,10)
-print()
-print(pq.fit(vectors))
+vectors = np.array(
+    [
+        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+        [2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+        [3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+        [4, 5, 6, 7, 8, 9, 10, 11, 12, 13],
+        [5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
+        [6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+        [10, 9, 8, 7, 6, 5, 4, 3, 2, 1],
+        [11, 10, 9, 8, 7, 6, 5, 4, 3, 2],
+        [12, 11, 10, 9, 8, 7, 6, 5, 4, 3],
+        [20, 18, 16, 14, 12, 10, 8, 6, 4, 2],
+        [21, 19, 17, 15, 13, 11, 9, 7, 5, 3],
+        [22, 20, 18, 16, 14, 12, 10, 8, 6, 4],
+    ]
+)
+
+pq = ProductQuantizer(2, 4, 10, 1024)
+pq.fit(vectors)
+print(pq.encode(vectors))
+
