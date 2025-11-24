@@ -1,6 +1,7 @@
 import numpy as np
-from sklearn.cluster import KMeans, MiniBatchKMeans
-from typing import List, Union
+from sklearn.cluster import MiniBatchKMeans
+from typing import List
+
 
 class ProductQuantizer:
     def __init__(self, M, K, D, kmeans_batch_size):
@@ -15,9 +16,10 @@ class ProductQuantizer:
         self.batch_size = kmeans_batch_size
         if self.D % self.M != 0:
             raise ValueError("[PQ] D is not divisible by M")
-        self.d_sub = D//M  # subvector dimension
+        self.d_sub = D // M  # subvector dimension
         self.codebooks = None  # List of M codebooks, each (K, d_sub)
         self.is_trained = False
+
     def split_vectors(self, vectors: np.ndarray) -> List[np.ndarray]:
         """
         split vectors (N, D) to M sub-vectors
@@ -25,65 +27,71 @@ class ProductQuantizer:
         """
         # print("Vectors Shape: ", vectors.shape[:])
         N = vectors.shape[0]
-        reshape = vectors.reshape(N,self.M,self.d_sub) # reshape (N,D)->(N,M,d_sub)
+        reshape = vectors.reshape(N, self.M, self.d_sub)  # reshape (N,D)->(N,M,d_sub)
         # print("Reshaped Vectors: ", reshape)
         return np.split(reshape, self.M, axis=1)
-    
-    
+
     def fit(self, vectors):
         """Learn codebooks from training vectors"""
         subvectors_list = self.split_vectors(vectors)
         self.codebooks = []
         for i, subvectors in enumerate(subvectors_list):
-            subvectors = subvectors.squeeze(axis=1) # (N, d_sub, 1) -> (N, d_sub)
-            kmeans = MiniBatchKMeans(n_clusters=self.K, random_state=42,batch_size=self.batch_size)
+            subvectors = subvectors.squeeze(axis=1)  # (N, d_sub, 1) -> (N, d_sub)
+            kmeans = MiniBatchKMeans(
+                n_clusters=self.K, random_state=42, batch_size=self.batch_size
+            )
             kmeans.fit(subvectors)
             self.codebooks.append(kmeans.cluster_centers_)
         # print("Codebooks: ", self.codebooks)
-        self.is_trained = True 
+        self.is_trained = True
         print(f"[PQ] trained with M={self.M} subvectors and K={self.K} codewords each")
-    
+
     def encode(self, vectors):
         """Encode vectors to PQ codes"""
-        if not self.is_trained or self.codebooks is None: 
+        if not self.is_trained or self.codebooks is None:
             raise RuntimeError("[PQ] must be trained before encode")
-        
+
         subvectors_list = self.split_vectors(vectors)
         N = vectors.shape[0]
         codes = np.empty((N, self.M), dtype=np.int32)
 
-        for i, subvectors in enumerate(subvectors_list): 
-            subvectors = subvectors.squeeze(axis=1) 
+        for i, subvectors in enumerate(subvectors_list):
+            subvectors = subvectors.squeeze(axis=1)
             centroids = self.codebooks[i]
 
-            dists = np.sum((subvectors[:, None, :]-centroids[None, :, :])**2, axis=2)
+            dists = np.sum(
+                (subvectors[:, None, :] - centroids[None, :, :]) ** 2, axis=2
+            )
             codes[:, i] = np.argmin(dists, axis=1)
-        return codes 
-        
-    
+        return codes
+
     def decode(self, codes):
         """Reconstruct approximate vectors from codes"""
         pass
-    
+
     def compute_asymmetric_distance(self, query, codes):
         """Compute distances between query and PQ-encoded vectors"""
         pass
 
-vectors = np.array([
-    [1,2,3,4,5,6,7,8,9,10],
-    [2,3,4,5,6,7,8,9,10,11],
-    [3,4,5,6,7,8,9,10,11,12],
-    [4,5,6,7,8,9,10,11,12,13],
-    [5,6,7,8,9,10,11,12,13,14],
-    [6,7,8,9,10,11,12,13,14,15],
-    [10,9,8,7,6,5,4,3,2,1],
-    [11,10,9,8,7,6,5,4,3,2],
-    [12,11,10,9,8,7,6,5,4,3],
-    [20,18,16,14,12,10,8,6,4,2],
-    [21,19,17,15,13,11,9,7,5,3],
-    [22,20,18,16,14,12,10,8,6,4],
-])
 
-pq = ProductQuantizer(2,4,10, 1024)
+vectors = np.array(
+    [
+        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+        [2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+        [3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+        [4, 5, 6, 7, 8, 9, 10, 11, 12, 13],
+        [5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
+        [6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+        [10, 9, 8, 7, 6, 5, 4, 3, 2, 1],
+        [11, 10, 9, 8, 7, 6, 5, 4, 3, 2],
+        [12, 11, 10, 9, 8, 7, 6, 5, 4, 3],
+        [20, 18, 16, 14, 12, 10, 8, 6, 4, 2],
+        [21, 19, 17, 15, 13, 11, 9, 7, 5, 3],
+        [22, 20, 18, 16, 14, 12, 10, 8, 6, 4],
+    ]
+)
+
+pq = ProductQuantizer(2, 4, 10, 1024)
 pq.fit(vectors)
 print(pq.encode(vectors))
+
