@@ -3,7 +3,7 @@ from sklearn.cluster import KMeans, MiniBatchKMeans
 from typing import List, Union
 
 class ProductQuantizer:
-    def __init__(self, M, K, D):
+    def __init__(self, M, K, D, kmeans_batch_size):
         """
         M: number of subvectors
         K: codebook size per subvector
@@ -12,6 +12,7 @@ class ProductQuantizer:
         self.M = M
         self.K = K
         self.D = D
+        self.batch_size = kmeans_batch_size
         if self.D % self.M != 0:
             raise ValueError("[PQ] D is not divisible by M")
         self.d_sub = D//M  # subvector dimension
@@ -28,17 +29,6 @@ class ProductQuantizer:
         print("Reshaped Vectors: ", reshape)
         return np.split(reshape, self.M, axis=1)
     
-    def choose_batch_size(self, N: int) -> int: 
-        """
-        Too small -> noisy updates (worse clusters)
-        Too large -> slow, consumes too much memory
-        batch_size << N (0.05% - 0.2%)
-        """
-        if 1e6 <= N <= 5e6: 
-            return 1024
-        if 5e6 < N <= 1e7:
-            return 2048
-        return 4096
     
     def fit(self, vectors):
         """Learn codebooks from training vectors"""
@@ -47,7 +37,7 @@ class ProductQuantizer:
         self.codebooks = []
         for i, subvectors in enumerate(subvectors_list):
             subvectors = subvectors.squeeze(axis=1) # (N, d_sub, 1) -> (N, d_sub)
-            kmeans = MiniBatchKMeans(n_clusters=self.K, random_state=42,verbose=1,batch_size=batch_size)
+            kmeans = MiniBatchKMeans(n_clusters=self.K, random_state=42,verbose=1,batch_size=self.batch_size)
             kmeans.fit(subvectors)
             self.codebooks.append(kmeans.cluster_centers_)
         print("Codebooks: ", self.codebooks)
