@@ -78,6 +78,11 @@ class VecDB:
 
     def _build_index(self):
         # Placeholder for index building logic
+        # TODO: call ivf
+        # TODO: Compute Residuals
+        # TODO: PQ encode 
+        # TODO: write in index file 
+        # TODO: load index method 
         pass
 
 
