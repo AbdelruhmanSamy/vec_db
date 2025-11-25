@@ -3,7 +3,7 @@ from sklearn.cluster import MiniBatchKMeans
 
 
 class IVF:
-    def __init__(self, K, D, batch_size):
+    def __init__(self, K, D, batch_size, DB_Size):
         """
         K: number of coarse clusters (inverted lists)
         D: dimension of original vectors
@@ -14,6 +14,7 @@ class IVF:
         self.coarse_centroids = None
         self.inverted_lists = [[] for _ in range(K)]
         self.is_trained = False
+        self.assignments = [[] for _ in range(DB_Size)]
 
     def fit(self, vectors):
         """
@@ -27,12 +28,13 @@ class IVF:
         )
         kmeans.fit(vectors)
         self.coarse_centroids = kmeans.cluster_centers_
-        print(self.coarse_centroids)
         self.is_trained = True
         assert kmeans.labels_.ndim == 1
-        assignments = kmeans.labels_
-        for idx, cluster_id in enumerate(assignments):
-            self.inverted_lists[cluster_id].append(vectors[idx])
+        self.assignments = kmeans.labels_
+        for idx, cluster_id in enumerate(self.assignments):
+            self.inverted_lists[cluster_id].append(
+                (idx, vectors[idx] - self.coarse_centroids[cluster_id])
+            )
 
     # def assign(self, vectors):
     #     """
@@ -46,25 +48,3 @@ class IVF:
     #     )
     #     nearest = np.argmin(dists, axis=1)
     #     return nearest
-
-
-vectors = [
-    [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
-    [2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
-    [3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
-    [4, 5, 6, 7, 8, 9, 10, 11, 12, 13],
-    [5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
-    [6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
-    [10, 9, 8, 7, 6, 5, 4, 3, 2, 1],
-    [11, 10, 9, 8, 7, 6, 5, 4, 3, 2],
-    [12, 11, 10, 9, 8, 7, 6, 5, 4, 3],
-    [20, 18, 16, 14, 12, 10, 8, 6, 4, 2],
-    [21, 19, 17, 15, 13, 11, 9, 7, 5, 3],
-    [22, 20, 18, 16, 14, 12, 10, 8, 6, 4],
-]
-
-ivf = IVF(4, 10, 1024)
-ivf.fit(vectors)
-# ivf.assign(vectors)
-print(ivf.inverted_lists)
-print(ivf.coarse_centroids)

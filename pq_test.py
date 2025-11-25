@@ -4,9 +4,9 @@ import time
 from pq import ProductQuantizer
 
 D = 70
-M = 10          
-K = 100         
-N = 500_000     
+M = 10
+K = 5
+N = 10
 
 print("Generating random data...")
 vectors = np.random.rand(N, D).astype(np.float32)
@@ -21,6 +21,7 @@ print(f"Training finished in {time.time() - t0:.2f} seconds")
 print("Encoding...")
 t1 = time.time()
 codes = pq.encode(vectors)
+print(codes)
 print(f"Encoding finished in {time.time() - t1:.2f} seconds")
 
 print("Decoding...")
