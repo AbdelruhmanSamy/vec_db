@@ -1,7 +1,8 @@
 from typing import Dict, List, Annotated
 import numpy as np
 import os
-import gzip, pickle
+import gzip
+import pickle
 from ivf import IVF
 from pq import ProductQuantizer
 
@@ -16,13 +17,15 @@ BATCH_SIZE = 1024
 class VecDB:
     def __init__(
         self,
+        centroids_path="centroids.dat",
         database_file_path="saved_db.dat",
-        index_file_path="index.dat",
+        index_file_path="index",
         new_db=True,
         db_size=None,
     ) -> None:
         self.db_path = database_file_path
         self.index_path = index_file_path
+        self.centroids_path = centroids_path
         if new_db:
             if db_size is None:
                 raise ValueError("You need to provide the size of the database")
@@ -32,9 +35,9 @@ class VecDB:
             self.generate_database(db_size)
 
     def generate_database(self, size: int) -> None:
-        # rng = np.random.default_rng(DB_SEED_NUMBER)
-        # vectors = rng.random((size, DIMENSION), dtype=np.float32)
-        # self._write_vectors_to_file(vectors)
+        rng = np.random.default_rng(DB_SEED_NUMBER)
+        vectors = rng.random((size, DIMENSION), dtype=np.float32)
+        self._write_vectors_to_file(vectors)
         self._build_index(size)
 
     def _write_vectors_to_file(self, vectors: np.ndarray) -> None:
@@ -56,7 +59,6 @@ class VecDB:
         )
         mmap_vectors[num_old_records:] = rows
         mmap_vectors.flush()
-        # TODO: might change to call insert in the index, if you need
         self._build_index()
 
     def get_one_row(self, row_num: int) -> np.ndarray:
@@ -102,33 +104,28 @@ class VecDB:
         return cosine_similarity
 
     def _build_index(self, size=10_000):
-        # Placeholder for index building logic
-        # TODO: call ivf
-        rng = np.random.default_rng(DB_SEED_NUMBER)
-        vectors = rng.random((size, DIMENSION), dtype=np.float32)
+        vectors = self.get_all_rows()
         ivf = IVF(K, DIMENSION, BATCH_SIZE, len(vectors))
         ivf.fit(vectors)
         inverted_index = ivf.inverted_lists
-        # TODO: PQ encode
+
         for vecs in inverted_index:
             for idx, residual in vecs:
                 vectors[idx] = residual
         pq = ProductQuantizer(M, K, DIMENSION, BATCH_SIZE)
         pq.fit(vectors)
         codes = pq.encode(vectors)
+
         for i, vecs in enumerate(inverted_index):
             for j, tup in enumerate(vecs):
                 inverted_index[i][j] = codes[tup[0]]
-        # TODO: write in index file
-        to_save = {
-            "centroids": ivf.coarse_centroids.astype(np.float32),
-            "inverted_index": [
-                np.asarray(lst, dtype=np.float32) for lst in inverted_index
-            ],
-        }
-        print(to_save)
-        with gzip.open(self.index_path, "wb") as f:
-            pickle.dump(to_save, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+        with gzip.open(self.centroids_path, "wb") as f:
+            pickle.dump(ivf.coarse_centroids, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+        for i, vecs in enumerate(inverted_index):
+            with gzip.open(f"self.index_path_{i}.dat", "wb") as f:
+                pickle.dump(inverted_index[i], f, protocol=pickle.HIGHEST_PROTOCOL)
 
 
 vec_db = VecDB(db_size=10)

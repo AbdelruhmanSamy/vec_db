@@ -33,7 +33,10 @@ class IVF:
         self.assignments = kmeans.labels_
         for idx, cluster_id in enumerate(self.assignments):
             self.inverted_lists[cluster_id].append(
-                (idx, vectors[idx] - self.coarse_centroids[cluster_id])
+                (
+                    idx,
+                    np.array(vectors[idx] - self.coarse_centroids[cluster_id]).tolist(),
+                )
             )
 
     # def assign(self, vectors):

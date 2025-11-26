@@ -2,6 +2,7 @@ import numpy as np
 from sklearn.cluster import MiniBatchKMeans
 from typing import List
 
+
 class ProductQuantizer:
     def __init__(self, M, K, D, kmeans_batch_size):
         """
@@ -18,7 +19,7 @@ class ProductQuantizer:
         self.d_sub = D // M  # subvector dimension
         self.codebooks = None  # List of M codebooks, each (K, d_sub)
         self.is_trained = False
-        
+
     def split_vectors(self, vectors: np.ndarray) -> List[np.ndarray]:
         """
         split vectors (N, D) to M sub-vectors
@@ -43,7 +44,7 @@ class ProductQuantizer:
             self.codebooks.append(kmeans.cluster_centers_)
         # print("Codebooks: ", self.codebooks)
         self.is_trained = True
-        print(f"[PQ] trained with M={self.M} subvectors and K={self.K} codewords each")
+        # print(f"[PQ] trained with M={self.M} subvectors and K={self.K} codewords each")
 
     def encode(self, vectors):
         """Encode vectors to PQ codes"""
@@ -67,67 +68,65 @@ class ProductQuantizer:
     def decode(self, codes):
         """
         Reconstruct approximate vectors from codes.
-        
+
         Parameters:
         -----------
         codes : np.ndarray
             Shape (N, M) - N vectors, M subquantizers
             OR (M,) - single vector
-            
+
         Returns:
         --------
         np.ndarray : Shape (N, D) or (D,) - reconstructed vectors
         """
         if codes.ndim == 1:
             codes = codes.reshape(1, -1)
-            
+
         N = codes.shape[0]
-        
+
         approx_vectors = np.zeros((N, self.M, self.d_sub), dtype=np.float32)
-        
+
         for m in range(self.M):
-            approx_vectors[:, m , :] = self.codebooks[m][codes[:, m]]
-            
+            approx_vectors[:, m, :] = self.codebooks[m][codes[:, m]]
+
         return approx_vectors.reshape(N, -1) if N > 1 else approx_vectors.reshape(-1)
 
-        
     def compute_asymmetric_distance(self, query, codes):
         """
         Compute distances between query and PQ-encoded vectors.
-        
+
         Parameters:
         -----------
         query : np.ndarray, shape (D,)
             Full-precision query vector
         codes : np.ndarray, shape (N, M)
             PQ codes for N database vectors
-            
+
         Returns:
         --------
         np.ndarray : Shape (N,) - distances from query to each vector
         """
-        
+
         if codes.ndim == 1:
             codes = codes.reshape(1, -1)
-            
+
         N = codes.shape[0]
         query_subvectors = query.reshape(self.M, self.d_sub)
-            
+
         distance_table = np.zeros((self.M, self.K), dtype=np.float32)
-        
+
         for m in range(self.M):
             distance_table[m, :] = np.sum(
-                (self.codebooks[m] - query_subvectors[m]) ** 2,
-                axis=1
+                (self.codebooks[m] - query_subvectors[m]) ** 2, axis=1
             )
-            
+
         distances = np.zeros(N, dtype=np.float32)
-        
+
         # Vectorized distance computation
         distances = np.take_along_axis(
             distance_table[np.newaxis, :, :],  # (1, M, K)
-            codes[:, :, np.newaxis],           # (N, M, 1)
-            axis=2
-        ).squeeze(axis=2)                     # (N, M)
+            codes[:, :, np.newaxis],  # (N, M, 1)
+            axis=2,
+        ).squeeze(axis=2)  # (N, M)
 
         return np.sqrt(np.sum(distances, axis=1))
