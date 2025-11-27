@@ -1,16 +1,17 @@
-from typing import Dict, List, Annotated
+from typing import Dict, List, Annotated, Tuple
 import numpy as np
 import os
+import gc
 import gzip
 import pickle
 from ivf import IVF
 from pq import ProductQuantizer
 
-M = 7
+M = 5
 DB_SEED_NUMBER = 42
 ELEMENT_SIZE = np.dtype(np.float32).itemsize
 DIMENSION = 70
-K = 4
+K = 10
 BATCH_SIZE = 1024
 
 
@@ -24,8 +25,10 @@ class VecDB:
         db_size=None,
     ) -> None:
         self.db_path = database_file_path
+        self.codes = None
         self.index_path = index_file_path
         self.centroids_path = centroids_path
+        self.pq = None
         if new_db:
             if db_size is None:
                 raise ValueError("You need to provide the size of the database")
@@ -38,7 +41,7 @@ class VecDB:
         rng = np.random.default_rng(DB_SEED_NUMBER)
         vectors = rng.random((size, DIMENSION), dtype=np.float32)
         self._write_vectors_to_file(vectors)
-        self._build_index(size)
+        self._build_index()
 
     def _write_vectors_to_file(self, vectors: np.ndarray) -> None:
         mmap_vectors = np.memmap(
@@ -87,25 +90,66 @@ class VecDB:
     def retrieve(self, query: Annotated[np.ndarray, (1, DIMENSION)], top_k=5):
         scores = []
         num_records = self._get_num_records()
+        coarse_centroids = self._load_centroids()
         # here we assume that the row number is the ID of each vector
-        for row_num in range(num_records):
-            vector = self.get_one_row(row_num)
-            score = self._cal_score(query, vector)
-            scores.append((score, row_num))
-        # here we assume that if two rows have the same score, return the lowest ID
+        scores = np.linalg.norm(coarse_centroids - query, axis=1)
+        centroid_idx = np.argmin(scores)
+        residual = query - coarse_centroids[centroid_idx]
+        encoded_res = self.pq.encode(np.array([residual])).tolist()[0]
+        partition = self._load_partition(int(centroid_idx))
+        scores = []
+        for code, idx in partition:
+            score = self._cal_score(encoded_res, code)
+            scores.append((score, idx))
         scores = sorted(scores, reverse=True)[:top_k]
+        # return [self.get_one_row(s[1]) for s in scores]
         return [s[1] for s in scores]
 
-    def _cal_score(self, vec1, vec2):
-        dot_product = np.dot(vec1, vec2)
-        norm_vec1 = np.linalg.norm(vec1)
-        norm_vec2 = np.linalg.norm(vec2)
-        cosine_similarity = dot_product / (norm_vec1 * norm_vec2)
-        return cosine_similarity
+    def _load_partition(self, idx: int) -> list[Tuple[np.ndarray, int]]:
+        partition = None
+        with gzip.open(f"{self.index_path}_{idx}.dat", "rb") as f:
+            partition = pickle.load(f)
+        return partition
 
-    def _build_index(self, size=10_000):
+    def _load_centroids(self) -> np.ndarray:
+        coarse_centroids = None
+        with gzip.open(self.centroids_path, "rb") as f:
+            coarse_centroids = pickle.load(f)
+
+        return coarse_centroids
+
+    def _cal_score(
+        self, encoded_query: np.ndarray, encoded_db_code: np.ndarray
+    ) -> float:
+        """
+        Compute approximate similarity between a PQ-encoded query residual and
+        a PQ-encoded database code.
+
+        Both encoded_query and encoded_db_code are arrays of centroid indices.
+        """
+        score = 0.0
+        for i, (q_idx, db_idx) in enumerate(zip(encoded_query, encoded_db_code)):
+            # Get centroid vectors from PQ codebook
+            q_centroid = self.pq.codebooks[i][q_idx]
+            db_centroid = self.pq.codebooks[i][db_idx]
+
+            # Cosine similarity per sub-vector
+            dot = np.dot(q_centroid, db_centroid)
+            norm_q = np.linalg.norm(q_centroid)
+            norm_db = np.linalg.norm(db_centroid)
+            score += dot / (norm_q * norm_db)
+        return score
+
+    # def _cal_score(self, vec1, vec2):
+    #     dot_product = np.dot(vec1, vec2)
+    #     norm_vec1 = np.linalg.norm(vec1)
+    #     norm_vec2 = np.linalg.norm(vec2)
+    #     cosine_similarity = dot_product / (norm_vec1 * norm_vec2)
+    #     return cosine_similarity
+
+    def _build_index(self):
         vectors = self.get_all_rows()
-        ivf = IVF(K, DIMENSION, BATCH_SIZE, len(vectors))
+        ivf = IVF(K, DIMENSION, BATCH_SIZE, self._get_num_records())
         ivf.fit(vectors)
         inverted_index = ivf.inverted_lists
 
@@ -113,19 +157,27 @@ class VecDB:
             for idx, residual in vecs:
                 vectors[idx] = residual
         pq = ProductQuantizer(M, K, DIMENSION, BATCH_SIZE)
+        self.pq = pq
         pq.fit(vectors)
         codes = pq.encode(vectors)
-
+        self.codes = codes
         for i, vecs in enumerate(inverted_index):
             for j, tup in enumerate(vecs):
-                inverted_index[i][j] = codes[tup[0]]
+                inverted_index[i][j] = (codes[tup[0]], tup[0])
 
         with gzip.open(self.centroids_path, "wb") as f:
             pickle.dump(ivf.coarse_centroids, f, protocol=pickle.HIGHEST_PROTOCOL)
 
         for i, vecs in enumerate(inverted_index):
-            with gzip.open(f"self.index_path_{i}.dat", "wb") as f:
+            with gzip.open(f"{self.index_path}_{i}.dat", "wb") as f:
                 pickle.dump(inverted_index[i], f, protocol=pickle.HIGHEST_PROTOCOL)
 
 
-vec_db = VecDB(db_size=10)
+# vec_db = VecDB(db_size=10_000)
+# rng = np.random.default_rng(DB_SEED_NUMBER)
+# query = rng.random((1, DIMENSION), dtype=np.float32)[0]
+# query = rng.random((1, DIMENSION), dtype=np.float32)[0]
+# query = rng.random((1, DIMENSION), dtype=np.float32)[0]
+# query = rng.random((1, DIMENSION), dtype=np.float32)[0]
+# print(query)
+# print(vec_db.retrieve(query))
