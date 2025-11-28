@@ -7,11 +7,11 @@ import pickle
 from ivf import IVF
 from pq import ProductQuantizer
 
-M = 5
+M = 35
 DB_SEED_NUMBER = 42
 ELEMENT_SIZE = np.dtype(np.float32).itemsize
 DIMENSION = 70
-K = 10
+K = 20  # 20
 BATCH_SIZE = 1024
 
 
@@ -23,8 +23,10 @@ class VecDB:
         index_file_path="index",
         new_db=True,
         db_size=None,
+        mode="ivf_flat",
     ) -> None:
         self.db_path = database_file_path
+        self.mode = mode
         self.codes = None
         self.index_path = index_file_path
         self.centroids_path = centroids_path
@@ -88,6 +90,28 @@ class VecDB:
         return np.array(vectors)
 
     def retrieve(self, query: Annotated[np.ndarray, (1, DIMENSION)], top_k=5):
+        return self.retrieve_ivf(query, top_k)
+
+    def retrieve_ivf(self, query: Annotated[np.ndarray, (1, DIMENSION)], top_k=5):
+        coarse_centroids = self._load_centroids()
+        # print("\n\n\n")
+        # print(query)
+        # print("\n\n\n")
+        # print("\n\n\n")
+        # print(coarse_centroids)
+        # print("\n\n\n")
+        scores = np.linalg.norm(coarse_centroids - query, axis=1)
+        centroid_idx = np.argmin(scores)
+        partition = self._load_partition(int(centroid_idx))
+        vectors = [self.get_one_row(i) for i in partition]
+        scores = []
+        for i, v in enumerate(vectors):
+            score = self._cal_score_cosine(v.flatten(), query.flatten())
+            scores.append((score, partition[i]))
+        scores = sorted(scores, reverse=True)[:top_k]
+        return [s[1] for s in scores]
+
+    def retrieve_pq(self, query: Annotated[np.ndarray, (1, DIMENSION)], top_k=5):
         scores = []
         num_records = self._get_num_records()
         coarse_centroids = self._load_centroids()
@@ -107,13 +131,13 @@ class VecDB:
 
     def _load_partition(self, idx: int) -> list[Tuple[np.ndarray, int]]:
         partition = None
-        with gzip.open(f"{self.index_path}_{idx}.dat", "rb") as f:
+        with gzip.open(f"ivf_flat/{self.index_path}_{idx}.dat", "rb") as f:
             partition = pickle.load(f)
         return partition
 
     def _load_centroids(self) -> np.ndarray:
         coarse_centroids = None
-        with gzip.open(self.centroids_path, "rb") as f:
+        with gzip.open(f"ivf_flat/{self.centroids_path}", "rb") as f:
             coarse_centroids = pickle.load(f)
 
         return coarse_centroids
@@ -140,14 +164,34 @@ class VecDB:
             score += dot / (norm_q * norm_db)
         return score
 
-    # def _cal_score(self, vec1, vec2):
-    #     dot_product = np.dot(vec1, vec2)
-    #     norm_vec1 = np.linalg.norm(vec1)
-    #     norm_vec2 = np.linalg.norm(vec2)
-    #     cosine_similarity = dot_product / (norm_vec1 * norm_vec2)
-    #     return cosine_similarity
+    def _cal_score_cosine(self, vec1, vec2):
+        dot_product = np.dot(vec1, vec2)
+        norm_vec1 = np.linalg.norm(vec1)
+        norm_vec2 = np.linalg.norm(vec2)
+        cosine_similarity = dot_product / (norm_vec1 * norm_vec2)
+        return cosine_similarity
+
+    def _build_index_ivf(self):
+        vectors = self.get_all_rows()
+        ivf = IVF(K, DIMENSION, BATCH_SIZE, self._get_num_records())
+        ivf.fit(vectors)
+
+        with gzip.open(f"ivf_flat/{self.centroids_path}", "wb") as f:
+            pickle.dump(ivf.coarse_centroids, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+        for i, vecs in enumerate(ivf.inverted_lists):
+            with gzip.open(f"ivf_flat/{self.index_path}_{i}.dat", "wb") as f:
+                pickle.dump(vecs, f, protocol=pickle.HIGHEST_PROTOCOL)
 
     def _build_index(self):
+        if self.mode == "ivf_flat":
+            self._build_index_ivf()
+        elif self.mode == "ivf_pq":
+            self._build_index_pq()
+        else:
+            print("Choose an indexing method")
+
+    def _build_index_pq(self):
         vectors = self.get_all_rows()
         ivf = IVF(K, DIMENSION, BATCH_SIZE, self._get_num_records())
         ivf.fit(vectors)
@@ -165,7 +209,7 @@ class VecDB:
             for j, tup in enumerate(vecs):
                 inverted_index[i][j] = (codes[tup[0]], tup[0])
 
-        with gzip.open(self.centroids_path, "wb") as f:
+        with gzip.open(f"ivf_flat/{self.centroids_path}", "wb") as f:
             pickle.dump(ivf.coarse_centroids, f, protocol=pickle.HIGHEST_PROTOCOL)
 
         for i, vecs in enumerate(inverted_index):
@@ -173,7 +217,7 @@ class VecDB:
                 pickle.dump(inverted_index[i], f, protocol=pickle.HIGHEST_PROTOCOL)
 
 
-# vec_db = VecDB(db_size=10_000)
+# vec_db = VecDB(db_size=10_000, mode="ivf_flat")
 # rng = np.random.default_rng(DB_SEED_NUMBER)
 # query = rng.random((1, DIMENSION), dtype=np.float32)[0]
 # query = rng.random((1, DIMENSION), dtype=np.float32)[0]

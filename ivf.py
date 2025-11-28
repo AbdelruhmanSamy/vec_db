@@ -10,6 +10,7 @@ class IVF:
         """
         self.K = K
         self.D = D
+        self.FLAT = True
         self.batch_size = batch_size
         self.coarse_centroids = None
         self.inverted_lists = [[] for _ in range(K)]
@@ -32,12 +33,17 @@ class IVF:
         assert kmeans.labels_.ndim == 1
         self.assignments = kmeans.labels_
         for idx, cluster_id in enumerate(self.assignments):
-            self.inverted_lists[cluster_id].append(
-                (
-                    idx,
-                    np.array(vectors[idx] - self.coarse_centroids[cluster_id]).tolist(),
+            if self.FLAT:
+                self.inverted_lists[cluster_id].append(idx)
+            else:
+                self.inverted_lists[cluster_id].append(
+                    (
+                        idx,
+                        np.array(
+                            vectors[idx] - self.coarse_centroids[cluster_id]
+                        ).tolist(),
+                    )
                 )
-            )
 
     # def assign(self, vectors):
     #     """
