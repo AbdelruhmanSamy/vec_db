@@ -14,11 +14,12 @@ DIMENSION = 70
 K = 200
 BATCH_SIZE = 1024
 
+defult_dict = {"K": 200, "M": 8, "n_probe": 2}
 params = {
-    "1000000": {"K": 170, "M": 8, "n_probe": 3},
-    "10000000": {"K": 230, "M": 8, "n_probe": 2},
-    "15000000": {"K": 250, "M": 8, "n_probe": 3},
-    "20000000": {"K": 300, "M": 8, "n_probe": 4}
+    1000000: {"K": 250, "M": 8, "n_probe": 3},
+    10000000: {"K": 330, "M": 8, "n_probe": 3},
+    15000000: {"K": 370, "M": 8, "n_probe": 3},
+    20000000: {"K": 410, "M": 8, "n_probe": 4}
 }
 
 
@@ -97,7 +98,9 @@ class VecDB:
         )
         return np.array(vectors)
 
-    def retrieve(self, query: Annotated[np.ndarray, (1, DIMENSION)], top_k=5, n_probe=1):
+    def retrieve(self, query: Annotated[np.ndarray, (1, DIMENSION)], top_k=5):
+        curr_params = params.get(self._get_num_records(), defult_dict)
+        n_probe = curr_params.get("n_probe")
         return self.retrieve_ivf(query, top_k, n_probe)
 
     def retrieve_ivf(self, query: Annotated[np.ndarray, (1, DIMENSION)], top_k=5, n_probe=1):
@@ -184,7 +187,7 @@ class VecDB:
         cosine_similarity = dot_product / (norm_vec1 * norm_vec2)
         return cosine_similarity
 
-    def _build_index_ivf(self):
+    def _build_index_ivf(self, K):
         vectors = self.get_all_rows()
         ivf = IVF(K, DIMENSION, BATCH_SIZE, self._get_num_records())
         ivf.fit(vectors)
@@ -199,14 +202,19 @@ class VecDB:
                 pickle.dump(vecs, f, protocol=pickle.HIGHEST_PROTOCOL)
 
     def _build_index(self):
+        curr_params = params.get(self._get_num_records(), defult_dict)
+        num_clusters = curr_params.get("K")
+        num_subvectors= curr_params.get("M")
+        print(f"curr_params: {curr_params}\n")
+
         if self.mode == "ivf_flat":
-            self._build_index_ivf()
+            self._build_index_ivf(num_clusters)
         elif self.mode == "ivf_pq":
-            self._build_index_pq()
+            self._build_index_pq(num_clusters, num_subvectors)
         else:
             print("Choose an indexing method")
 
-    def _build_index_pq(self):
+    def _build_index_pq(self, K, M):
         vectors = self.get_all_rows()
         ivf = IVF(K, DIMENSION, BATCH_SIZE, self._get_num_records())
         ivf.fit(vectors)

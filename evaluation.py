@@ -14,13 +14,13 @@ class Result:
     actual_ids: List[int]
 
 
-def run_queries(db, np_rows, top_k, num_runs, n_probe=1):
+def run_queries(db, np_rows, top_k, num_runs):
     results = []
     for _ in range(num_runs):
         query = np.random.random((1, 70))
 
         tic = time.time()
-        db_ids = db.retrieve(query, top_k, n_probe=n_probe)
+        db_ids = db.retrieve(query, top_k)
         toc = time.time()
         run_time = toc - tic
 
@@ -64,11 +64,23 @@ def eval(results: List[Result]):
     return sum(scores) / len(scores), sum(run_time) / len(run_time)
 
 
-if __name__ == "__main__":
-    db = VecDB(db_size=10**6, mode="ivf_flat")
+################## TESTING CODE ####################
+def check(db_size , top_k, num_runs, mode="ivf_flat", new_db=True):
+    db = VecDB(db_size=db_size, mode=mode, new_db=new_db)
     # db = VecDB(db_size=1000_000, mode="ivf_flat")
 
     all_db = db.get_all_rows()
 
-    res = run_queries(db, all_db, 10, 10, 3)
+    res = run_queries(db, all_db, top_k, num_runs)
     print(eval(res))
+
+
+if __name__ == "__main__":
+
+    check(
+        db_size= 1000_000, 
+        top_k= 5,
+        num_runs= 5, 
+        mode="ivf_flat", 
+        new_db=True
+        )
