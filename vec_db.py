@@ -11,8 +11,15 @@ M = 35
 DB_SEED_NUMBER = 42
 ELEMENT_SIZE = np.dtype(np.float32).itemsize
 DIMENSION = 70
-K = 20  # 20
+K = 200
 BATCH_SIZE = 1024
+
+params = {
+    "1000000": {"K": 170, "M": 8, "n_probe": 3},
+    "10000000": {"K": 230, "M": 8, "n_probe": 2},
+    "15000000": {"K": 250, "M": 8, "n_probe": 3},
+    "20000000": {"K": 300, "M": 8, "n_probe": 4}
+}
 
 
 class VecDB:
@@ -25,6 +32,7 @@ class VecDB:
         db_size=None,
         mode="ivf_flat",
     ) -> None:
+        
         self.db_path = database_file_path
         self.mode = mode
         self.codes = None
@@ -89,27 +97,32 @@ class VecDB:
         )
         return np.array(vectors)
 
-    def retrieve(self, query: Annotated[np.ndarray, (1, DIMENSION)], top_k=5):
-        return self.retrieve_ivf(query, top_k)
+    def retrieve(self, query: Annotated[np.ndarray, (1, DIMENSION)], top_k=5, n_probe=1):
+        return self.retrieve_ivf(query, top_k, n_probe)
 
-    def retrieve_ivf(self, query: Annotated[np.ndarray, (1, DIMENSION)], top_k=5):
+    def retrieve_ivf(self, query: Annotated[np.ndarray, (1, DIMENSION)], top_k=5, n_probe=1):
         coarse_centroids = self._load_centroids()
+        scores = np.linalg.norm(coarse_centroids - query, axis=1)
+        top_centroid_indices = np.argsort(scores)[:n_probe] 
         # print("\n\n\n")
         # print(query)
         # print("\n\n\n")
         # print("\n\n\n")
         # print(coarse_centroids)
         # print("\n\n\n")
-        scores = np.linalg.norm(coarse_centroids - query, axis=1)
-        centroid_idx = np.argmin(scores)
-        partition = self._load_partition(int(centroid_idx))
-        vectors = [self.get_one_row(i) for i in partition]
+        candidates = []
+        for centroid_idx in top_centroid_indices:
+            partition = self._load_partition(int(centroid_idx))
+            candidates.extend(partition)
+
+        vectors = [self.get_one_row(i) for i in candidates]
         scores = []
         for i, v in enumerate(vectors):
             score = self._cal_score_cosine(v.flatten(), query.flatten())
-            scores.append((score, partition[i]))
+            scores.append((score, candidates[i]))
         scores = sorted(scores, reverse=True)[:top_k]
         return [s[1] for s in scores]
+
 
     def retrieve_pq(self, query: Annotated[np.ndarray, (1, DIMENSION)], top_k=5):
         scores = []
@@ -176,6 +189,8 @@ class VecDB:
         ivf = IVF(K, DIMENSION, BATCH_SIZE, self._get_num_records())
         ivf.fit(vectors)
 
+        if not os.path.exists("ivf_flat"):
+            os.makedirs("ivf_flat") 
         with gzip.open(f"ivf_flat/{self.centroids_path}", "wb") as f:
             pickle.dump(ivf.coarse_centroids, f, protocol=pickle.HIGHEST_PROTOCOL)
 
@@ -208,6 +223,9 @@ class VecDB:
         for i, vecs in enumerate(inverted_index):
             for j, tup in enumerate(vecs):
                 inverted_index[i][j] = (codes[tup[0]], tup[0])
+        
+        if not os.path.exists("ivf_flat"):
+            os.makedirs("ivf_flat") 
 
         with gzip.open(f"ivf_flat/{self.centroids_path}", "wb") as f:
             pickle.dump(ivf.coarse_centroids, f, protocol=pickle.HIGHEST_PROTOCOL)
@@ -217,7 +235,7 @@ class VecDB:
                 pickle.dump(inverted_index[i], f, protocol=pickle.HIGHEST_PROTOCOL)
 
 
-# vec_db = VecDB(db_size=10_000, mode="ivf_flat")
+# vec_db = VecDB(db_size=100_000, mode="ivf_flat")
 # rng = np.random.default_rng(DB_SEED_NUMBER)
 # query = rng.random((1, DIMENSION), dtype=np.float32)[0]
 # query = rng.random((1, DIMENSION), dtype=np.float32)[0]
