@@ -15,45 +15,26 @@ class IVF:
         self.coarse_centroids = None
         self.inverted_lists = [[] for _ in range(K)]
         self.is_trained = False
-        self.assignments = [[] for _ in range(DB_Size)]
+        self.kmeans = MiniBatchKMeans(
+            n_clusters=self.K,
+            random_state=42,
+            batch_size=self.batch_size,
+            n_init='auto'
+        )
 
     def fit(self, vectors):
         """
         Train coarse quantizer using k-means on the original vectors
+        (we don't load all data at once)
         """
-        kmeans = MiniBatchKMeans(
-            n_clusters=self.K,
-            random_state=42,
-            batch_size=self.batch_size,
-            compute_labels=True,
-        )
-        kmeans.fit(vectors)
-        self.coarse_centroids = kmeans.cluster_centers_
-        self.is_trained = True
-        assert kmeans.labels_.ndim == 1
-        self.assignments = kmeans.labels_
-        for idx, cluster_id in enumerate(self.assignments):
-            if self.FLAT:
-                self.inverted_lists[cluster_id].append(idx)
-            else:
-                self.inverted_lists[cluster_id].append(
-                    (
-                        idx,
-                        np.array(
-                            vectors[idx] - self.coarse_centroids[cluster_id]
-                        ).tolist(),
-                    )
-                )
 
-    # def assign(self, vectors):
-    #     """
-    #     Assign new vectors to nearest coarse centroid (no training)
-    #     Returns array of cluster ids
-    #     """
-    #     if not self.is_trained:
-    #         raise RuntimeError("[IVF] must be trained before assign")
-    #     dists = np.sum(
-    #         (vectors[:, None, :] - self.coarse_centroids[None, :, :]) ** 2, axis=2
-    #     )
-    #     nearest = np.argmin(dists, axis=1)
-    #     return nearest
+        self.kmeans.fit(vectors)
+        self.coarse_centroids = self.kmeans.cluster_centers_
+        self.is_trained = True
+        assert self.kmeans.labels_.ndim == 1
+
+    def predict(self, vectors):
+        """
+        Returns the cluster ID for a batch of vectors
+        """
+        return self.kmeans.predict(vectors)

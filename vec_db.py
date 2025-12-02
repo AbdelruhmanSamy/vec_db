@@ -8,18 +8,17 @@ from ivf import IVF
 from pq import ProductQuantizer
 
 M = 35
-DB_SEED_NUMBER = 42
+DB_SEED_NUMBER = 10
 ELEMENT_SIZE = np.dtype(np.float32).itemsize
-DIMENSION = 70
+DIMENSION = 64
 K = 200
 BATCH_SIZE = 1024
 
-defult_dict = {"K": 200, "M": 8, "n_probe": 2}
+defult_dict = {"K": 1000, "n_probe": 20}
 params = {
-    1000000: {"K": 250, "M": 8, "n_probe": 3},
-    10000000: {"K": 330, "M": 8, "n_probe": 3},
-    15000000: {"K": 370, "M": 8, "n_probe": 3},
-    20000000: {"K": 410, "M": 8, "n_probe": 4}
+    1_000_000: {"K": 1000, "n_probe": 20},
+    10_000_000: {"K": 2500, "n_probe": 25},
+    20_000_000: {"K": 3000, "n_probe": 30}
 }
 
 
@@ -43,10 +42,12 @@ class VecDB:
         if new_db:
             if db_size is None:
                 raise ValueError("You need to provide the size of the database")
-            # delete the old DB file if exists
-            if os.path.exists(self.db_path):
-                os.remove(self.db_path)
-            self.generate_database(db_size)
+            
+            if not os.path.exists(self.db_path):
+                self.generate_database(db_size)
+                
+            else:
+                self._build_index()
 
     def generate_database(self, size: int) -> None:
         rng = np.random.default_rng(DB_SEED_NUMBER)
@@ -96,7 +97,7 @@ class VecDB:
         vectors = np.memmap(
             self.db_path, dtype=np.float32, mode="r", shape=(num_records, DIMENSION)
         )
-        return np.array(vectors)
+        return vectors
 
     def retrieve(self, query: Annotated[np.ndarray, (1, DIMENSION)], top_k=5):
         curr_params = params.get(self._get_num_records(), defult_dict)
@@ -104,27 +105,39 @@ class VecDB:
         return self.retrieve_ivf(query, top_k, n_probe)
 
     def retrieve_ivf(self, query: Annotated[np.ndarray, (1, DIMENSION)], top_k=5, n_probe=1):
+        
         coarse_centroids = self._load_centroids()
-        scores = np.linalg.norm(coarse_centroids - query, axis=1)
-        top_centroid_indices = np.argsort(scores)[:n_probe] 
-        # print("\n\n\n")
-        # print(query)
-        # print("\n\n\n")
-        # print("\n\n\n")
-        # print(coarse_centroids)
-        # print("\n\n\n")
+        
+        dists = np.linalg.norm(coarse_centroids - query, axis=1)
+        top_centroid_indices = np.argsort(dists)[:n_probe] 
+
         candidates = []
         for centroid_idx in top_centroid_indices:
             partition = self._load_partition(int(centroid_idx))
-            candidates.extend(partition)
+            candidates.append(partition)
 
-        vectors = [self.get_one_row(i) for i in candidates]
-        scores = []
-        for i, v in enumerate(vectors):
-            score = self._cal_score_cosine(v.flatten(), query.flatten())
-            scores.append((score, candidates[i]))
-        scores = sorted(scores, reverse=True)[:top_k]
-        return [s[1] for s in scores]
+        candidate_ids = np.concatenate(candidate_ids)
+        
+        candidate_ids.sort()
+        
+        all_data = self.get_all_rows()
+        vectors = np.array(all_data[candidate_ids]) 
+        norms = np.linalg.norm(vectors, axis=1, keepdims=True)
+        norms[norms == 0] = 1.0
+        vectors = vectors / norms
+        
+        q_norm = np.linalg.norm(query)
+        if q_norm > 0: query = query / q_norm
+        
+        scores = np.dot(vectors, query.T).flatten()
+        
+        if len(scores) > top_k:
+            best_local = np.argpartition(scores, -top_k)[-top_k:]
+            best_local = best_local[np.argsort(scores[best_local])[::-1]]
+        else:
+            best_local = np.argsort(scores)[::-1]
+            
+        return candidate_ids[best_local].tolist()
 
 
     def retrieve_pq(self, query: Annotated[np.ndarray, (1, DIMENSION)], top_k=5):
@@ -147,13 +160,13 @@ class VecDB:
 
     def _load_partition(self, idx: int) -> list[Tuple[np.ndarray, int]]:
         partition = None
-        with gzip.open(f"ivf_flat/{self.index_path}_{idx}.dat", "rb") as f:
+        with gzip.open(f"{self.index_path}/index_{idx}.dat", "rb") as f:
             partition = pickle.load(f)
         return partition
 
     def _load_centroids(self) -> np.ndarray:
         coarse_centroids = None
-        with gzip.open(f"ivf_flat/{self.centroids_path}", "rb") as f:
+        with gzip.open(f"{self.index_path}/{self.centroids_path}", "rb") as f:
             coarse_centroids = pickle.load(f)
 
         return coarse_centroids
@@ -188,18 +201,62 @@ class VecDB:
         return cosine_similarity
 
     def _build_index_ivf(self, K):
+        total_records = self._get_num_records()
+        sample_size = 50_000
         vectors = self.get_all_rows()
+        
+        rng = np.random.default_rng(DB_SEED_NUMBER)
+        sample_indices = rng.choice(total_records, sample_size, replace=False)
+        sample_indices.sort() 
+        sample_vectors = np.array(vectors[sample_indices]) 
         ivf = IVF(K, DIMENSION, BATCH_SIZE, self._get_num_records())
-        ivf.fit(vectors)
+        ivf.fit(sample_vectors)
 
-        if not os.path.exists("ivf_flat"):
-            os.makedirs("ivf_flat") 
-        with gzip.open(f"ivf_flat/{self.centroids_path}", "wb") as f:
+        if not os.path.exists(self.index_path):
+            os.makedirs(self.index_path)
+
+        with gzip.open(f"{self.index_path}/{self.centroids_path}", "wb") as f:
             pickle.dump(ivf.coarse_centroids, f, protocol=pickle.HIGHEST_PROTOCOL)
 
-        for i, vecs in enumerate(ivf.inverted_lists):
-            with gzip.open(f"ivf_flat/{self.index_path}_{i}.dat", "wb") as f:
-                pickle.dump(vecs, f, protocol=pickle.HIGHEST_PROTOCOL)
+        print("Assigning clusters...")
+        all_labels = np.zeros(total_records, dtype=np.int32)
+        batch_size = 100_000
+        
+        for start_idx in range(0, total_records, batch_size):
+            end_idx = min(start_idx + batch_size, total_records)
+            
+            # Read batch from memmap
+            vecs = np.array(vectors[start_idx:end_idx])
+            labels = ivf.predict(vecs)
+            
+            all_labels[start_idx:end_idx] = labels
+            
+            if start_idx % 5_000_000 == 0:
+                print(f"  Processed {start_idx}...")
+                gc.collect()
+
+        # 3. Invert the List (RAM OPTIMIZED)
+        # We sort the labels to group IDs together
+        print("Grouping IDs...")
+        sorted_ids = np.argsort(all_labels) # original Row IDs sorted by cluster
+        sorted_labels = all_labels[sorted_ids]
+        
+        # Find split points where label changes
+        diffs = np.where(np.diff(sorted_labels) != 0)[0] + 1
+        splits = np.split(sorted_ids, diffs)
+        present_clusters = np.unique(sorted_labels)
+        
+        print("Saving index files...")
+        for i, cluster_id in enumerate(present_clusters):
+            # Get IDs for this cluster
+            ids = splits[i].astype(np.int32)
+            
+            # Save to index_X.dat
+            file_path = os.path.join(self.index_path, f"index_{cluster_id}.dat")
+            with gzip.open(file_path, "wb") as f:
+                pickle.dump(ids, f, protocol=pickle.HIGHEST_PROTOCOL)
+                
+        print("Index Build Complete.")
 
     def _build_index(self):
         curr_params = params.get(self._get_num_records(), defult_dict)
