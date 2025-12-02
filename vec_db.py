@@ -116,12 +116,12 @@ class VecDB:
             partition = self._load_partition(int(centroid_idx))
             candidates.append(partition)
 
-        candidate_ids = np.concatenate(candidate_ids)
+        candidates = np.concatenate(candidates)
         
-        candidate_ids.sort()
+        candidates.sort()
         
         all_data = self.get_all_rows()
-        vectors = np.array(all_data[candidate_ids]) 
+        vectors = np.array(all_data[candidates]) 
         norms = np.linalg.norm(vectors, axis=1, keepdims=True)
         norms[norms == 0] = 1.0
         vectors = vectors / norms
@@ -137,7 +137,7 @@ class VecDB:
         else:
             best_local = np.argsort(scores)[::-1]
             
-        return candidate_ids[best_local].tolist()
+        return candidates[best_local].tolist()
 
 
     def retrieve_pq(self, query: Annotated[np.ndarray, (1, DIMENSION)], top_k=5):
