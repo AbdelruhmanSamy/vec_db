@@ -38,6 +38,7 @@ class VecDB:
         self.codes = None
         self.index_path = index_file_path
         self.centroids_path = centroids_path
+        self.coarse_centroids = None
         self.pq = None
         if new_db:
             if db_size is None:
@@ -103,42 +104,6 @@ class VecDB:
         curr_params = params.get(self._get_num_records(), defult_dict)
         n_probe = curr_params.get("n_probe")
         return self.retrieve_ivf(query, top_k, n_probe)
-
-    def retrieve_ivf(self, query: Annotated[np.ndarray, (1, DIMENSION)], top_k=5, n_probe=1):
-        
-        coarse_centroids = self._load_centroids()
-        
-        dists = np.linalg.norm(coarse_centroids - query, axis=1)
-        top_centroid_indices = np.argsort(dists)[:n_probe] 
-
-        candidates = []
-        for centroid_idx in top_centroid_indices:
-            partition = self._load_partition(int(centroid_idx))
-            candidates.append(partition)
-
-        candidates = np.concatenate(candidates)
-        
-        candidates.sort()
-        
-        all_data = self.get_all_rows()
-        vectors = np.array(all_data[candidates]) 
-        norms = np.linalg.norm(vectors, axis=1, keepdims=True)
-        norms[norms == 0] = 1.0
-        vectors = vectors / norms
-        
-        q_norm = np.linalg.norm(query)
-        if q_norm > 0: query = query / q_norm
-        
-        scores = np.dot(vectors, query.T).flatten()
-        
-        if len(scores) > top_k:
-            best_local = np.argpartition(scores, -top_k)[-top_k:]
-            best_local = best_local[np.argsort(scores[best_local])[::-1]]
-        else:
-            best_local = np.argsort(scores)[::-1]
-            
-        return candidates[best_local].tolist()
-
 
     def retrieve_pq(self, query: Annotated[np.ndarray, (1, DIMENSION)], top_k=5):
         scores = []
