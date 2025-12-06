@@ -4,8 +4,6 @@ import os
 import gc
 import gzip
 import pickle
-from ivf import IVF
-from pq import ProductQuantizer
 
 M = 35
 DB_SEED_NUMBER = 10
@@ -166,93 +164,113 @@ class VecDB:
         return cosine_similarity
 
     def retrieve_ivf(self, query: Annotated[np.ndarray, (1, DIMENSION)], top_k=5, n_probe=1):
-        # 1. Lazy Load Centroids (Only happens on first query)
+        """Version with hard candidate limit for absolute RAM guarantee"""
+
         if self.coarse_centroids is None:
             self.coarse_centroids = self._load_centroids()
         
-        # 2. Find nearest centroids
         dists = np.linalg.norm(self.coarse_centroids - query, axis=1)
-        top_centroid_indices = np.argsort(dists)[:n_probe] 
+        top_centroid_indices = np.argsort(dists)[:n_probe]
 
-        # 3. Gather Candidates
+        # Gather candidates with size control
         candidates = []
+        MAX_TOTAL_CANDIDATES = 80000  # Hard limit: ~20MB of vectors
+        
         for centroid_idx in top_centroid_indices:
             partition = self._load_partition(int(centroid_idx))
-            candidates.append(partition)
+            
+            # Check if adding this partition would exceed limit
+            if len(candidates) + len(partition) > MAX_TOTAL_CANDIDATES:
+                # Take only what fits
+                remaining = MAX_TOTAL_CANDIDATES - len(candidates)
+                if remaining > 0:
+                    candidates.extend(partition[:remaining])
+                break
+            else:
+                candidates.extend(partition)
         
         if not candidates:
             return []
-
-        candidates = np.concatenate(candidates)
-        # Unique and Sort are critical for efficient Disk I/O
+        
+        # Convert to array and remove duplicates
+        candidates = np.array(candidates, dtype=np.int32)
         candidates = np.unique(candidates)
-        candidates.sort()
-
-        # --- OPTIMIZED MICRO-BATCHING ---
-        # A batch size of 10,000 uses ~2.5 MB of RAM. 
-        # This is well under the 50MB limit but much faster than smaller batches.
-        MICRO_BATCH_SIZE = 10000 
         
-        all_data = self.get_all_rows() # Memmap handle
+        # Create memmap
+        num_records = self._get_num_records()
+        mmap_vectors = np.memmap(
+            self.db_path, dtype=np.float32, mode='r', 
+            shape=(num_records, DIMENSION)
+        )
         
-        # Normalize Query Once
+        # Load candidates
+        vectors = np.array(mmap_vectors[candidates])
+        del mmap_vectors  # DELETE IMMEDIATELY
+        
+        # Normalize
+        norms = np.linalg.norm(vectors, axis=1, keepdims=True)
+        norms[norms == 0] = 1.0
+        vectors /= norms
+        
         q_norm = np.linalg.norm(query)
-        if q_norm > 0: 
-            query_normed = query / q_norm
+        if q_norm > 0:
+            query = query / q_norm
+        
+        # Score and rank
+        scores = np.dot(vectors, query.T).flatten()
+        
+        if len(scores) > top_k:
+            best_local = np.argpartition(scores, -top_k)[-top_k:]
+            best_local = best_local[np.argsort(scores[best_local])[::-1]]
         else:
-            query_normed = query
+            best_local = np.argsort(scores)[::-1]
+        
+        return candidates[best_local].tolist()
 
-        best_ids = []
-        best_scores = []
-        
-        num_candidates = len(candidates)
-        
-        for i in range(0, num_candidates, MICRO_BATCH_SIZE):
-            # Define batch range
-            end = min(i + MICRO_BATCH_SIZE, num_candidates)
-            batch_ids = candidates[i:end]
-            
-            # LOAD: Copy only this small chunk from Disk to RAM
-            vecs_batch = np.array(all_data[batch_ids])
-            
-            # NORMALIZE: In-place to save RAM
-            norms = np.linalg.norm(vecs_batch, axis=1, keepdims=True)
-            norms[norms == 0] = 1.0
-            vecs_batch /= norms
-            
-            # SCORE
-            scores = np.dot(vecs_batch, query_normed.T).flatten()
-            
-            # FILTER: Keep only top_k from this batch
-            if len(scores) > top_k:
-                # argpartition is O(n), faster than sorting
-                top_local_idx = np.argpartition(scores, -top_k)[-top_k:]
-                best_ids.extend(batch_ids[top_local_idx])
-                best_scores.extend(scores[top_local_idx])
-            else:
-                best_ids.extend(batch_ids)
-                best_scores.extend(scores)
-            
-            # CLEANUP: Free memory immediately
-            del vecs_batch
-            del scores
-            del norms
-            # We skip gc.collect() here to gain speed. 
-            # Python's ref counting handles this specific case well enough.
 
-        # 4. Final Global Sort
-        best_ids = np.array(best_ids)
-        best_scores = np.array(best_scores)
+# DIAGNOSTIC FUNCTION: Add this to check partition sizes
+    def diagnose_partitions(self):
+        """Call this to see partition size distribution"""
+        print(f"\n=== Partition Analysis for {self.index_path} ===")
+        print(f"Database size: {self._get_num_records():,} vectors")
         
-        if len(best_scores) > top_k:
-            final_indices = np.argpartition(best_scores, -top_k)[-top_k:]
-            sorted_indices = final_indices[np.argsort(best_scores[final_indices])[::-1]]
-            final_ids = best_ids[sorted_indices]
-        else:
-            sorted_indices = np.argsort(best_scores)[::-1]
-            final_ids = best_ids[sorted_indices]
+        # Try to load centroids to get K
+        try:
+            centroids = self._load_centroids()
+            K = len(centroids)
+            print(f"Number of clusters (K): {K}")
+            print(f"Expected avg partition size: {self._get_num_records() // K:,}")
+        except:
+            print("Could not load centroids")
+            return
+        
+        # Check partition file sizes
+        partition_sizes = []
+        for i in range(min(K, 100)):  # Check first 100 partitions
+            try:
+                partition = self._load_partition(i)
+                size = len(partition)
+                partition_sizes.append(size)
+                if i < 10:  # Show first 10
+                    print(f"  Partition {i}: {size:,} vectors")
+            except:
+                break
+        
+        if partition_sizes:
+            print(f"\nPartition size statistics (first {len(partition_sizes)} partitions):")
+            print(f"  Min: {min(partition_sizes):,}")
+            print(f"  Max: {max(partition_sizes):,}")
+            print(f"  Mean: {np.mean(partition_sizes):,.0f}")
+            print(f"  Median: {np.median(partition_sizes):,.0f}")
             
-        return final_ids.tolist()
+            # Estimate RAM for typical query
+            curr_params = params.get(self._get_num_records(), defult_dict)
+            n_probe = curr_params.get("n_probe", 20)
+            estimated_candidates = np.mean(partition_sizes) * n_probe
+            estimated_ram_mb = (estimated_candidates * DIMENSION * 4) / (1024 * 1024)
+            print(f"\nWith n_probe={n_probe}:")
+            print(f"  Estimated candidates: {estimated_candidates:,.0f}")
+            print(f"  Estimated RAM: {estimated_ram_mb:.2f} MB")
 
     def _build_index(self):
         curr_params = params.get(self._get_num_records(), defult_dict)
