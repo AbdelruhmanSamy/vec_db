@@ -152,7 +152,7 @@ class VecDB:
         partition = self._load_partition(int(centroid_idx))
         scores = []
         for code, idx in partition:
-            score = self._cal_score(encoded_res, code)
+            score = self._cal_score_pq(encoded_res, code)
             scores.append((score, idx))
         scores = sorted(scores, reverse=True)[:top_k]
         # return [self.get_one_row(s[1]) for s in scores]
@@ -171,7 +171,7 @@ class VecDB:
 
         return coarse_centroids
 
-    def _cal_score(
+    def _cal_score_pq(
         self, encoded_query: np.ndarray, encoded_db_code: np.ndarray
     ) -> float:
         """
@@ -193,7 +193,7 @@ class VecDB:
             score += dot / (norm_q * norm_db)
         return score
 
-    def _cal_score_cosine(self, vec1, vec2):
+    def _cal_score(self, vec1, vec2):
         dot_product = np.dot(vec1, vec2)
         norm_vec1 = np.linalg.norm(vec1)
         norm_vec2 = np.linalg.norm(vec2)
