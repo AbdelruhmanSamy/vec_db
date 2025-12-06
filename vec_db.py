@@ -200,63 +200,94 @@ class VecDB:
         cosine_similarity = dot_product / (norm_vec1 * norm_vec2)
         return cosine_similarity
 
-    def _build_index_ivf(self, K):
-        total_records = self._get_num_records()
-        sample_size = 50_000
-        vectors = self.get_all_rows()
+    def retrieve_ivf(self, query: Annotated[np.ndarray, (1, DIMENSION)], top_k=5, n_probe=1):
+        # 1. Lazy Load Centroids (Only happens on first query)
+        if self.coarse_centroids is None:
+            self.coarse_centroids = self._load_centroids()
         
-        rng = np.random.default_rng(DB_SEED_NUMBER)
-        sample_indices = rng.choice(total_records, sample_size, replace=False)
-        sample_indices.sort() 
-        sample_vectors = np.array(vectors[sample_indices]) 
-        ivf = IVF(K, DIMENSION, BATCH_SIZE, self._get_num_records())
-        ivf.fit(sample_vectors)
+        # 2. Find nearest centroids
+        dists = np.linalg.norm(self.coarse_centroids - query, axis=1)
+        top_centroid_indices = np.argsort(dists)[:n_probe] 
 
-        if not os.path.exists(self.index_path):
-            os.makedirs(self.index_path)
-
-        with gzip.open(f"{self.index_path}/{self.centroids_path}", "wb") as f:
-            pickle.dump(ivf.coarse_centroids, f, protocol=pickle.HIGHEST_PROTOCOL)
-
-        print("Assigning clusters...")
-        all_labels = np.zeros(total_records, dtype=np.int32)
-        batch_size = 100_000
+        # 3. Gather Candidates
+        candidates = []
+        for centroid_idx in top_centroid_indices:
+            partition = self._load_partition(int(centroid_idx))
+            candidates.append(partition)
         
-        for start_idx in range(0, total_records, batch_size):
-            end_idx = min(start_idx + batch_size, total_records)
-            
-            # Read batch from memmap
-            vecs = np.array(vectors[start_idx:end_idx])
-            labels = ivf.predict(vecs)
-            
-            all_labels[start_idx:end_idx] = labels
-            
-            if start_idx % 5_000_000 == 0:
-                print(f"  Processed {start_idx}...")
-                gc.collect()
+        if not candidates:
+            return []
 
-        # 3. Invert the List (RAM OPTIMIZED)
-        # We sort the labels to group IDs together
-        print("Grouping IDs...")
-        sorted_ids = np.argsort(all_labels) # original Row IDs sorted by cluster
-        sorted_labels = all_labels[sorted_ids]
+        candidates = np.concatenate(candidates)
+        # Unique and Sort are critical for efficient Disk I/O
+        candidates = np.unique(candidates)
+        candidates.sort()
+
+        # --- OPTIMIZED MICRO-BATCHING ---
+        # A batch size of 10,000 uses ~2.5 MB of RAM. 
+        # This is well under the 50MB limit but much faster than smaller batches.
+        MICRO_BATCH_SIZE = 10000 
         
-        # Find split points where label changes
-        diffs = np.where(np.diff(sorted_labels) != 0)[0] + 1
-        splits = np.split(sorted_ids, diffs)
-        present_clusters = np.unique(sorted_labels)
+        all_data = self.get_all_rows() # Memmap handle
         
-        print("Saving index files...")
-        for i, cluster_id in enumerate(present_clusters):
-            # Get IDs for this cluster
-            ids = splits[i].astype(np.int32)
+        # Normalize Query Once
+        q_norm = np.linalg.norm(query)
+        if q_norm > 0: 
+            query_normed = query / q_norm
+        else:
+            query_normed = query
+
+        best_ids = []
+        best_scores = []
+        
+        num_candidates = len(candidates)
+        
+        for i in range(0, num_candidates, MICRO_BATCH_SIZE):
+            # Define batch range
+            end = min(i + MICRO_BATCH_SIZE, num_candidates)
+            batch_ids = candidates[i:end]
             
-            # Save to index_X.dat
-            file_path = os.path.join(self.index_path, f"index_{cluster_id}.dat")
-            with gzip.open(file_path, "wb") as f:
-                pickle.dump(ids, f, protocol=pickle.HIGHEST_PROTOCOL)
-                
-        print("Index Build Complete.")
+            # LOAD: Copy only this small chunk from Disk to RAM
+            vecs_batch = np.array(all_data[batch_ids])
+            
+            # NORMALIZE: In-place to save RAM
+            norms = np.linalg.norm(vecs_batch, axis=1, keepdims=True)
+            norms[norms == 0] = 1.0
+            vecs_batch /= norms
+            
+            # SCORE
+            scores = np.dot(vecs_batch, query_normed.T).flatten()
+            
+            # FILTER: Keep only top_k from this batch
+            if len(scores) > top_k:
+                # argpartition is O(n), faster than sorting
+                top_local_idx = np.argpartition(scores, -top_k)[-top_k:]
+                best_ids.extend(batch_ids[top_local_idx])
+                best_scores.extend(scores[top_local_idx])
+            else:
+                best_ids.extend(batch_ids)
+                best_scores.extend(scores)
+            
+            # CLEANUP: Free memory immediately
+            del vecs_batch
+            del scores
+            del norms
+            # We skip gc.collect() here to gain speed. 
+            # Python's ref counting handles this specific case well enough.
+
+        # 4. Final Global Sort
+        best_ids = np.array(best_ids)
+        best_scores = np.array(best_scores)
+        
+        if len(best_scores) > top_k:
+            final_indices = np.argpartition(best_scores, -top_k)[-top_k:]
+            sorted_indices = final_indices[np.argsort(best_scores[final_indices])[::-1]]
+            final_ids = best_ids[sorted_indices]
+        else:
+            sorted_indices = np.argsort(best_scores)[::-1]
+            final_ids = best_ids[sorted_indices]
+            
+        return final_ids.tolist()
 
     def _build_index(self):
         curr_params = params.get(self._get_num_records(), defult_dict)
@@ -298,13 +329,3 @@ class VecDB:
         for i, vecs in enumerate(inverted_index):
             with gzip.open(f"{self.index_path}_{i}.dat", "wb") as f:
                 pickle.dump(inverted_index[i], f, protocol=pickle.HIGHEST_PROTOCOL)
-
-
-# vec_db = VecDB(db_size=100_000, mode="ivf_flat")
-# rng = np.random.default_rng(DB_SEED_NUMBER)
-# query = rng.random((1, DIMENSION), dtype=np.float32)[0]
-# query = rng.random((1, DIMENSION), dtype=np.float32)[0]
-# query = rng.random((1, DIMENSION), dtype=np.float32)[0]
-# query = rng.random((1, DIMENSION), dtype=np.float32)[0]
-# print(query)
-# print(vec_db.retrieve(query))
