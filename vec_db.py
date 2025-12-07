@@ -4,6 +4,8 @@ import os
 import gc
 import gzip
 import pickle
+from ivf import IVF
+from pq import ProductQuantizer
 
 M = 35
 DB_SEED_NUMBER = 10
@@ -174,7 +176,7 @@ class VecDB:
 
         # Gather candidates with size control
         candidates = []
-        MAX_TOTAL_CANDIDATES = 80000  # Hard limit: ~20MB of vectors
+        MAX_TOTAL_CANDIDATES = 1000  # Hard limit: ~20MB of vectors
         
         for centroid_idx in top_centroid_indices:
             partition = self._load_partition(int(centroid_idx))
