@@ -3,6 +3,7 @@ import numpy as np
 import os
 import gc
 import gzip
+import heapq
 import pickle
 from ivf import IVF
 from pq import ProductQuantizer
@@ -165,69 +166,59 @@ class VecDB:
         cosine_similarity = dot_product / (norm_vec1 * norm_vec2)
         return cosine_similarity
 
-    def retrieve_ivf(self, query: Annotated[np.ndarray, (1, DIMENSION)], top_k=5, n_probe=1):
-        """Version with hard candidate limit for absolute RAM guarantee"""
-
-        if self.coarse_centroids is None:
+    def retrieve_ivf(self, query: np.ndarray, top_k=5, n_probe=1):
+          if self.coarse_centroids is None:
             self.coarse_centroids = self._load_centroids()
-        
-        dists = np.linalg.norm(self.coarse_centroids - query, axis=1)
-        top_centroid_indices = np.argsort(dists)[:n_probe]
 
-        # Gather candidates with size control
-        candidates = []
-        MAX_TOTAL_CANDIDATES = 1000  # Hard limit: ~20MB of vectors
-        
-        for centroid_idx in top_centroid_indices:
-            partition = self._load_partition(int(centroid_idx))
-            
-            # Check if adding this partition would exceed limit
-            if len(candidates) + len(partition) > MAX_TOTAL_CANDIDATES:
-                # Take only what fits
-                remaining = MAX_TOTAL_CANDIDATES - len(candidates)
-                if remaining > 0:
-                    candidates.extend(partition[:remaining])
-                break
-            else:
-                candidates.extend(partition)
-        
-        if not candidates:
-            return []
-        
-        # Convert to array and remove duplicates
-        candidates = np.array(candidates, dtype=np.int32)
-        candidates = np.unique(candidates)
-        
-        # Create memmap
-        num_records = self._get_num_records()
-        mmap_vectors = np.memmap(
-            self.db_path, dtype=np.float32, mode='r', 
-            shape=(num_records, DIMENSION)
-        )
-        
-        # Load candidates
-        vectors = np.array(mmap_vectors[candidates])
-        del mmap_vectors  # DELETE IMMEDIATELY
-        
-        # Normalize
-        norms = np.linalg.norm(vectors, axis=1, keepdims=True)
-        norms[norms == 0] = 1.0
-        vectors /= norms
-        
-        q_norm = np.linalg.norm(query)
-        if q_norm > 0:
-            query = query / q_norm
-        
-        # Score and rank
-        scores = np.dot(vectors, query.T).flatten()
-        
-        if len(scores) > top_k:
-            best_local = np.argpartition(scores, -top_k)[-top_k:]
-            best_local = best_local[np.argsort(scores[best_local])[::-1]]
-        else:
-            best_local = np.argsort(scores)[::-1]
-        
-        return candidates[best_local].tolist()
+          # Ensure query is float32 and normalized
+          query = np.asarray(query, dtype=np.float32).reshape(DIMENSION)
+
+          # --- 1. Find closest coarse centroids ---
+          dists = np.linalg.norm(self.coarse_centroids - query, axis=1)
+          top_centroid_indices = np.argpartition(dists, n_probe)[:n_probe]
+
+          heap = []
+
+          # --- 2. Open DB file ---
+          try:
+              db = open(self.db_path, "rb", buffering=False)
+          except Exception as e:
+              raise RuntimeError(f"Cannot open database file: {e}")
+
+          num_records = self._get_num_records()
+
+          for centroid_idx in top_centroid_indices:
+              partition = self._load_partition(int(centroid_idx))  # IDs only
+
+              for global_id in partition:
+                  # --- skip invalid IDs ---
+                  if not isinstance(global_id, (int, np.integer)) or global_id < 0 or global_id >= num_records:
+                      continue
+
+                  offset = int(global_id) * DIMENSION * ELEMENT_SIZE
+                  try:
+                      db.seek(offset)
+                      vec = np.frombuffer(db.read(DIMENSION * ELEMENT_SIZE), dtype=np.float32)
+                      if vec.size != DIMENSION:
+                          continue  # skip corrupted vectors
+                  except Exception:
+                      continue
+
+                  # Cosine similarity
+                  score = float(np.dot(vec, query))
+
+                  # Maintain top-k heap
+                  if len(heap) < top_k:
+                      heapq.heappush(heap, (score, global_id))
+                  else:
+                      if score > heap[0][0]:
+                          heapq.heapreplace(heap, (score, global_id))
+
+          db.close()
+
+          # Return top-k sorted by similarity
+          heap.sort(key=lambda x: x[0], reverse=True)
+          return np.array([gid for (_, gid) in heap], dtype=np.int32)
 
 
 # DIAGNOSTIC FUNCTION: Add this to check partition sizes
